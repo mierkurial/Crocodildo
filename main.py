@@ -12,7 +12,7 @@ from aiogram.enums import ParseMode
 
 load_dotenv()
 
-API_TOKEN = os.getenv('8778710584:AAE8vS4ouIZ-OAAGniG_zGqD-YfYvtL_lJo')
+API_TOKEN = os.getenv('BOT_TOKEN')
 DB_FILE = 'crocodildogamebot.db'
 WORDS_URL = 'https://raw.githubusercontent.com/Harrix/Russian-Nouns/main/dist/russian_nouns.txt'
 
