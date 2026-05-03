@@ -18,10 +18,14 @@ router = Router()
 
 active_timers = {}
 cooldowns = {}
+active_games_cache = {}
 
 
 async def init_db():
     async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute('PRAGMA journal_mode=WAL;')
+        await db.execute('PRAGMA synchronous=NORMAL;')
+
         await db.execute('''CREATE TABLE IF NOT EXISTS users (
                             chat_id INTEGER,
                             user_id INTEGER,
@@ -37,6 +41,11 @@ async def init_db():
                             chat_id INTEGER PRIMARY KEY,
                             host_id INTEGER,
                             current_word TEXT)''')
+
+        await db.execute('CREATE INDEX IF NOT EXISTS idx_words_used ON words(used)')
+        await db.execute('CREATE INDEX IF NOT EXISTS idx_users_score ON users(chat_id, score DESC)')
+
+        await db.execute('DELETE FROM active_games')
         await db.commit()
 
 
@@ -46,23 +55,21 @@ async def game_timeout(chat_id: int, bot: Bot):
     except asyncio.CancelledError:
         return
 
+    active_games_cache.pop(chat_id, None)
+    active_timers.pop(chat_id, None)
+
     async with aiosqlite.connect(DB_FILE) as db:
-        cursor = await db.execute('DELETE FROM active_games WHERE chat_id = ?', (chat_id,))
-        deleted = cursor.rowcount
+        await db.execute('DELETE FROM active_games WHERE chat_id = ?', (chat_id,))
         await db.commit()
 
-    if chat_id in active_timers:
-        del active_timers[chat_id]
-
-    if deleted > 0:
-        try:
-            await bot.send_message(
-                chat_id,
-                "Прошло 5 минут без активности. Игра автоматически отменена.",
-                parse_mode=ParseMode.HTML
-            )
-        except Exception as e:
-            logging.error(f"Timeout message error: {e}")
+    try:
+        await bot.send_message(
+            chat_id,
+            "Прошло 5 минут без активности. Игра автоматически отменена.",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logging.error(f"Timeout msg error: {e}")
 
 
 def set_timer(chat_id: int, bot: Bot):
@@ -106,50 +113,52 @@ async def cmd_stop(message: Message):
     chat_id = message.chat.id
     user_id = message.from_user.id
 
+    game_data = active_games_cache.get(chat_id)
+    if not game_data:
+        await message.answer("В этом чате сейчас нет активной игры.")
+        return
+
+    if user_id != game_data["host_id"]:
+        await message.answer("Остановить игру может только ведущий.")
+        return
+
+    active_games_cache.pop(chat_id, None)
+    cancel_timer(chat_id)
+
     async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT host_id FROM active_games WHERE chat_id = ?', (chat_id,)) as cursor:
-            game = await cursor.fetchone()
-            if not game:
-                await message.answer("В этом чате сейчас нет активной игры.")
-                return
-
-            host_id = game[0]
-            if user_id != host_id:
-                await message.answer("Остановить игру может только ведущий.")
-                return
-
         await db.execute('DELETE FROM active_games WHERE chat_id = ?', (chat_id,))
         await db.commit()
 
-    cancel_timer(chat_id)
     await message.answer("Игра остановлена ведущим.")
 
 
 @router.message(Command("play"))
 async def cmd_play(message: Message):
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT chat_id FROM active_games WHERE chat_id = ?', (message.chat.id,)) as cursor:
-            if await cursor.fetchone():
-                await message.answer("Игра уже идет в этом чате. Отгадайте текущее слово или введите /stop.")
-                return
+    chat_id = message.chat.id
 
-        async with db.execute('SELECT word FROM words WHERE used = 0 ORDER BY RANDOM() LIMIT 1') as cursor:
+    if chat_id in active_games_cache:
+        await message.answer("Игра уже идет в этом чате. Отгадайте текущее слово или введите /stop.")
+        return
+
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT word, description FROM words WHERE used = 0 ORDER BY RANDOM() LIMIT 1') as cursor:
             word_data = await cursor.fetchone()
 
         if not word_data:
             await message.answer("Слова в базе закончились.")
             return
 
-        word = word_data[0]
+        word, description = word_data
         host_id = message.from_user.id
 
         await db.execute(
             'INSERT OR REPLACE INTO active_games (chat_id, host_id, current_word) VALUES (?, ?, ?)',
-            (message.chat.id, host_id, word)
+            (chat_id, host_id, word)
         )
         await db.commit()
 
-    set_timer(message.chat.id, message.bot)
+    active_games_cache[chat_id] = {"word": word.lower(), "host_id": host_id, "description": description}
+    set_timer(chat_id, message.bot)
 
     host_link = f'<a href="tg://user?id={host_id}">{message.from_user.full_name}</a>'
 
@@ -165,27 +174,20 @@ async def show_word(callback: CallbackQuery):
     chat_id = callback.message.chat.id
     user_id = callback.from_user.id
 
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute(
-            'SELECT a.host_id, a.current_word, w.description '
-            'FROM active_games a '
-            'LEFT JOIN words w ON a.current_word = w.word '
-            'WHERE a.chat_id = ?', (chat_id,)
-        ) as cursor:
-            game = await cursor.fetchone()
-
-    if not game:
+    game_data = active_games_cache.get(chat_id)
+    if not game_data:
         await callback.answer("В этом чате нет активной игры.", show_alert=True)
         return
 
-    host_id, current_word, description = game
-
-    if user_id != host_id:
+    if user_id != game_data["host_id"]:
         await callback.answer("Ты не ведущий в этой игре.", show_alert=True)
         return
 
+    word = game_data["word"]
+    description = game_data.get("description")
     desc_text = description if description else "Описание отсутствует."
-    await callback.answer(f"Слово: {current_word}\n\n{desc_text}", show_alert=True)
+
+    await callback.answer(f"Слово: {word}\n\n{desc_text}", show_alert=True)
 
 
 @router.callback_query(F.data == "change_word")
@@ -193,20 +195,18 @@ async def change_word(callback: CallbackQuery):
     chat_id = callback.message.chat.id
     user_id = callback.from_user.id
 
+    game_data = active_games_cache.get(chat_id)
+    if not game_data:
+        await callback.answer("В этом чате нет активной игры.", show_alert=True)
+        return
+
+    if user_id != game_data["host_id"]:
+        await callback.answer("Ты не ведущий в этой игре.", show_alert=True)
+        return
+
+    current_word = game_data["word"]
+
     async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT host_id, current_word FROM active_games WHERE chat_id = ?', (chat_id,)) as cursor:
-            game = await cursor.fetchone()
-
-        if not game:
-            await callback.answer("В этом чате нет активной игры.", show_alert=True)
-            return
-
-        host_id, current_word = game
-
-        if user_id != host_id:
-            await callback.answer("Ты не ведущий в этой игре.", show_alert=True)
-            return
-
         async with db.execute(
                 'SELECT word, description FROM words WHERE used = 0 AND word != ? ORDER BY RANDOM() LIMIT 1',
                 (current_word,)
@@ -222,6 +222,7 @@ async def change_word(callback: CallbackQuery):
         await db.execute('UPDATE active_games SET current_word = ? WHERE chat_id = ?', (new_word, chat_id))
         await db.commit()
 
+    active_games_cache[chat_id] = {"word": new_word.lower(), "host_id": user_id, "description": description}
     set_timer(chat_id, callback.bot)
 
     desc_text = description if description else "Описание отсутствует."
@@ -246,20 +247,19 @@ async def become_host(callback: CallbackQuery):
         else:
             del cooldowns[chat_id]
 
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT chat_id FROM active_games WHERE chat_id = ?', (chat_id,)) as cursor:
-            if await cursor.fetchone():
-                await callback.answer("Игра уже идет.", show_alert=True)
-                return
+    if chat_id in active_games_cache:
+        await callback.answer("Игра уже идет.", show_alert=True)
+        return
 
-        async with db.execute('SELECT word FROM words WHERE used = 0 ORDER BY RANDOM() LIMIT 1') as cursor:
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute('SELECT word, description FROM words WHERE used = 0 ORDER BY RANDOM() LIMIT 1') as cursor:
             word_data = await cursor.fetchone()
 
         if not word_data:
             await callback.answer("Слова в базе закончились.", show_alert=True)
             return
 
-        word = word_data[0]
+        word, description = word_data
 
         await db.execute(
             'INSERT INTO active_games (chat_id, host_id, current_word) VALUES (?, ?, ?)',
@@ -267,6 +267,7 @@ async def become_host(callback: CallbackQuery):
         )
         await db.commit()
 
+    active_games_cache[chat_id] = {"word": word.lower(), "host_id": user_id, "description": description}
     set_timer(chat_id, callback.bot)
 
     if chat_id in cooldowns:
@@ -308,46 +309,44 @@ async def cmd_stats(message: Message):
 
 @router.message(F.text)
 async def check_word(message: Message):
+    text = message.text.strip().lower()
+    if len(text.split()) > 1:
+        return
+
     chat_id = message.chat.id
-    text = message.text.lower().strip()
+    game_data = active_games_cache.get(chat_id)
 
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT current_word, host_id FROM active_games WHERE chat_id = ?', (chat_id,)) as cursor:
-            game = await cursor.fetchone()
+    if not game_data:
+        return
 
-        if not game:
-            return
+    if message.from_user.id == game_data["host_id"]:
+        return
 
-        current_word, host_id = game
+    if text == game_data["word"]:
+        active_games_cache.pop(chat_id, None)
+        cancel_timer(chat_id)
 
-        if message.from_user.id == host_id:
-            return
+        user_id = message.from_user.id
+        username = message.from_user.full_name
 
-        if text == current_word.lower():
-            cancel_timer(chat_id)
-
-            user_id = message.from_user.id
-            username = message.from_user.full_name
-
+        async with aiosqlite.connect(DB_FILE) as db:
             await db.execute('''INSERT INTO users (chat_id, user_id, username, score) 
                                 VALUES (?, ?, ?, 1) 
                                 ON CONFLICT(chat_id, user_id) 
                                 DO UPDATE SET score = score + 1, username = excluded.username''',
                              (chat_id, user_id, username))
-
             await db.execute('DELETE FROM active_games WHERE chat_id = ?', (chat_id,))
-            await db.execute('UPDATE words SET used = 1 WHERE word = ?', (current_word,))
+            await db.execute('UPDATE words SET used = 1 WHERE word = ?', (text,))
             await db.commit()
 
-            cooldowns[chat_id] = {"winner_id": user_id, "time": time.time()}
+        cooldowns[chat_id] = {"winner_id": user_id, "time": time.time()}
+        user_link = f'<a href="tg://user?id={user_id}">{username}</a>'
 
-            user_link = f'<a href="tg://user?id={user_id}">{username}</a>'
-
-            await message.answer(
-                f"{user_link} отгадал(а) слово <b>{current_word}</b>.",
-                reply_markup=get_new_host_kb(),
-                parse_mode=ParseMode.HTML
-            )
+        await message.answer(
+            f"{user_link} отгадал(а) слово <b>{text}</b>.",
+            reply_markup=get_new_host_kb(),
+            parse_mode=ParseMode.HTML
+        )
 
 
 async def main():
