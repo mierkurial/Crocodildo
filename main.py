@@ -3,6 +3,7 @@ import logging
 import time
 import os
 import html
+import re
 import aiosqlite
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F, Router
@@ -185,6 +186,9 @@ async def show_word(callback: CallbackQuery):
     word = game_data["word"]
     description = game_data.get("description")
 
+    if description:
+        description = re.sub(r'^[^А-ЯЁ]+', '', description)
+
     text = f"Слово: {word}\n\nОписание: {description if description else 'отсутствует.'}"
 
     if len(text) > 200:
@@ -218,6 +222,9 @@ async def change_word(callback: CallbackQuery):
 
     active_games_cache[chat_id] = {"word": new_word.lower(), "host_id": user_id, "description": description}
     set_timer(chat_id, callback.bot)
+
+    if description:
+        description = re.sub(r'^[^А-ЯЁ]+', '', description)
 
     text = f"Новое слово: {new_word}\n\nОписание: {description if description else 'отсутствует.'}"
 
