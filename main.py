@@ -2,6 +2,7 @@
 import logging
 import time
 import os
+import random
 import aiosqlite
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F, Router
@@ -47,6 +48,27 @@ async def init_db():
 
         await db.execute('DELETE FROM active_games')
         await db.commit()
+
+
+async def get_random_word(db: aiosqlite.Connection, current_word: str = None):
+    if current_word:
+        cursor = await db.execute('SELECT COUNT(*) FROM words WHERE used = 0 AND word != ?', (current_word,))
+    else:
+        cursor = await db.execute('SELECT COUNT(*) FROM words WHERE used = 0')
+    count = (await cursor.fetchone())[0]
+
+    if count == 0:
+        return None
+
+    offset = random.randint(0, count - 1)
+
+    if current_word:
+        cursor = await db.execute('SELECT word, description FROM words WHERE used = 0 AND word != ? LIMIT 1 OFFSET ?',
+                                  (current_word, offset))
+    else:
+        cursor = await db.execute('SELECT word, description FROM words WHERE used = 0 LIMIT 1 OFFSET ?', (offset,))
+
+    return await cursor.fetchone()
 
 
 async def game_timeout(chat_id: int, bot: Bot):
@@ -141,8 +163,7 @@ async def cmd_play(message: Message):
         return
 
     async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT word, description FROM words WHERE used = 0 ORDER BY RANDOM() LIMIT 1') as cursor:
-            word_data = await cursor.fetchone()
+        word_data = await get_random_word(db)
 
         if not word_data:
             await message.answer("Слова в базе закончились.")
@@ -207,11 +228,7 @@ async def change_word(callback: CallbackQuery):
     current_word = game_data["word"]
 
     async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute(
-                'SELECT word, description FROM words WHERE used = 0 AND word != ? ORDER BY RANDOM() LIMIT 1',
-                (current_word,)
-        ) as cursor:
-            word_data = await cursor.fetchone()
+        word_data = await get_random_word(db, current_word)
 
         if not word_data:
             await callback.answer("Других слов в базе больше нет.", show_alert=True)
@@ -252,8 +269,7 @@ async def become_host(callback: CallbackQuery):
         return
 
     async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT word, description FROM words WHERE used = 0 ORDER BY RANDOM() LIMIT 1') as cursor:
-            word_data = await cursor.fetchone()
+        word_data = await get_random_word(db)
 
         if not word_data:
             await callback.answer("Слова в базе закончились.", show_alert=True)
