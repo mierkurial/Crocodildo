@@ -188,6 +188,7 @@ async def show_word(callback: CallbackQuery):
 
     if description:
         description = re.sub(r'^[^А-ЯЁ]+', '', description)
+        description = re.split(r'\s*(?:II|\|\|)', description)[0].strip()
 
     text = f"Слово: {word}\n\nОписание: {description if description else 'отсутствует.'}"
 
@@ -225,6 +226,7 @@ async def change_word(callback: CallbackQuery):
 
     if description:
         description = re.sub(r'^[^А-ЯЁ]+', '', description)
+        description = re.split(r'\s*(?:II|\|\|)', description)[0].strip()
 
     text = f"Новое слово: {new_word}\n\nОписание: {description if description else 'отсутствует.'}"
 
