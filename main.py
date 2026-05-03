@@ -41,23 +41,28 @@ async def init_db():
 
 
 async def game_timeout(chat_id: int, bot: Bot):
-    await asyncio.sleep(300)
+    try:
+        await asyncio.sleep(300)
+    except asyncio.CancelledError:
+        return
 
     async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('DELETE FROM active_games WHERE chat_id = ?', (chat_id,))
+        cursor = await db.execute('DELETE FROM active_games WHERE chat_id = ?', (chat_id,))
+        deleted = cursor.rowcount
         await db.commit()
-
-    try:
-        await bot.send_message(
-            chat_id,
-            "Прошло 5 минут без активности. Игра автоматически отменена.",
-            parse_mode=ParseMode.HTML
-        )
-    except Exception:
-        pass
 
     if chat_id in active_timers:
         del active_timers[chat_id]
+
+    if deleted > 0:
+        try:
+            await bot.send_message(
+                chat_id,
+                "Прошло 5 минут без активности. Игра автоматически отменена.",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            logging.error(f"Timeout message error: {e}")
 
 
 def set_timer(chat_id: int, bot: Bot):
@@ -75,7 +80,6 @@ def cancel_timer(chat_id: int):
 def get_word_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Узнать слово", callback_data="get_word")],
-        [InlineKeyboardButton(text="Подсказка", callback_data="get_hint")],
         [InlineKeyboardButton(text="Заменить", callback_data="change_word")]
     ])
 
@@ -162,51 +166,26 @@ async def show_word(callback: CallbackQuery):
     user_id = callback.from_user.id
 
     async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT host_id, current_word FROM active_games WHERE chat_id = ?', (chat_id,)) as cursor:
+        async with db.execute(
+            'SELECT a.host_id, a.current_word, w.description '
+            'FROM active_games a '
+            'LEFT JOIN words w ON a.current_word = w.word '
+            'WHERE a.chat_id = ?', (chat_id,)
+        ) as cursor:
             game = await cursor.fetchone()
 
     if not game:
         await callback.answer("В этом чате нет активной игры.", show_alert=True)
         return
 
-    host_id, current_word = game
+    host_id, current_word, description = game
 
     if user_id != host_id:
         await callback.answer("Ты не ведущий в этой игре.", show_alert=True)
         return
 
-    await callback.answer(f"Слово: {current_word}", show_alert=True)
-
-
-@router.callback_query(F.data == "get_hint")
-async def show_hint(callback: CallbackQuery):
-    chat_id = callback.message.chat.id
-    user_id = callback.from_user.id
-
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT host_id, current_word FROM active_games WHERE chat_id = ?', (chat_id,)) as cursor:
-            game = await cursor.fetchone()
-
-        if not game:
-            await callback.answer("В этом чате нет активной игры.", show_alert=True)
-            return
-
-        host_id, current_word = game
-
-        if user_id != host_id:
-            await callback.answer("Ты не ведущий в этой игре.", show_alert=True)
-            return
-
-        async with db.execute('SELECT description FROM words WHERE word = ?', (current_word,)) as cursor:
-            word_data = await cursor.fetchone()
-
-        if not word_data or not word_data[0]:
-            await callback.answer("Для этого слова нет описания.", show_alert=True)
-            return
-
-        description = word_data[0]
-
-    await callback.answer(f"Подсказка:\n{description}", show_alert=True)
+    desc_text = description if description else "Описание отсутствует."
+    await callback.answer(f"Слово: {current_word}\n\n{desc_text}", show_alert=True)
 
 
 @router.callback_query(F.data == "change_word")
@@ -229,7 +208,7 @@ async def change_word(callback: CallbackQuery):
             return
 
         async with db.execute(
-                'SELECT word FROM words WHERE used = 0 AND word != ? ORDER BY RANDOM() LIMIT 1',
+                'SELECT word, description FROM words WHERE used = 0 AND word != ? ORDER BY RANDOM() LIMIT 1',
                 (current_word,)
         ) as cursor:
             word_data = await cursor.fetchone()
@@ -238,14 +217,15 @@ async def change_word(callback: CallbackQuery):
             await callback.answer("Других слов в базе больше нет.", show_alert=True)
             return
 
-        new_word = word_data[0]
+        new_word, description = word_data
 
         await db.execute('UPDATE active_games SET current_word = ? WHERE chat_id = ?', (new_word, chat_id))
         await db.commit()
 
     set_timer(chat_id, callback.bot)
 
-    await callback.answer(f"Слово заменено.\nНовое слово: {new_word}", show_alert=True)
+    desc_text = description if description else "Описание отсутствует."
+    await callback.answer(f"Слово заменено.\nНовое слово: {new_word}\n\n{desc_text}", show_alert=True)
 
 
 @router.callback_query(F.data == "become_host")
