@@ -1,7 +1,6 @@
 ﻿import asyncio
 import logging
 import time
-import os
 import random
 import aiosqlite
 from dotenv import load_dotenv
@@ -12,7 +11,7 @@ from aiogram.enums import ParseMode
 
 load_dotenv()
 
-API_TOKEN = os.getenv('BOT_TOKEN')
+API_TOKEN = '8778710584:AAEmOeMIfyhcIYVEFovZMF87Urk1Jnau3rY'
 DB_FILE = 'dictionary.db'
 
 router = Router()
@@ -206,9 +205,16 @@ async def show_word(callback: CallbackQuery):
 
     word = game_data["word"]
     description = game_data.get("description")
-    desc_text = description if description else "Описание отсутствует."
 
-    await callback.answer(f"Слово: {word}\n\n{desc_text}", show_alert=True)
+    if description:
+        text = f"Слово: {word}\n\nОписание: {description}"
+    else:
+        text = f"Слово: {word}\n\nОписание отсутствует."
+
+    if len(text) > 200:
+        text = text[:197] + "..."
+
+    await callback.answer(text, show_alert=True)
 
 
 @router.callback_query(F.data == "change_word")
@@ -242,8 +248,15 @@ async def change_word(callback: CallbackQuery):
     active_games_cache[chat_id] = {"word": new_word.lower(), "host_id": user_id, "description": description}
     set_timer(chat_id, callback.bot)
 
-    desc_text = description if description else "Описание отсутствует."
-    await callback.answer(f"Слово заменено.\nНовое слово: {new_word}\n\n{desc_text}", show_alert=True)
+    if description:
+        text = f"Новое слово: {new_word}\n\nОписание: {description}"
+    else:
+        text = f"Новое слово: {new_word}\n\nОписание отсутствует."
+
+    if len(text) > 200:
+        text = text[:197] + "..."
+
+    await callback.answer(text, show_alert=True)
 
 
 @router.callback_query(F.data == "become_host")
