@@ -13,7 +13,7 @@ from aiogram.enums import ParseMode
 load_dotenv()
 
 API_TOKEN = os.getenv('BOT_TOKEN')
-DB_FILE = 'crocodildogamebot.db'
+DB_FILE = 'dictionary_new.db.db'
 WORDS_URL = 'https://raw.githubusercontent.com/Harrix/Russian-Nouns/main/dist/russian_nouns.txt'
 
 router = Router()
