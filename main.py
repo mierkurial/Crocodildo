@@ -1,6 +1,7 @@
 ﻿import asyncio
 import logging
 import time
+import os
 import random
 import aiosqlite
 from dotenv import load_dotenv
