@@ -11,7 +11,7 @@ from aiogram.enums import ParseMode
 
 load_dotenv()
 
-API_TOKEN = '8778710584:AAEmOeMIfyhcIYVEFovZMF87Urk1Jnau3rY'
+API_TOKEN = os.getenv('BOT_TOKEN')
 DB_FILE = 'dictionary.db'
 
 router = Router()
